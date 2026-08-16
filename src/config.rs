@@ -67,9 +67,12 @@ lazy_static::lazy_static! {
     static ref STATUS: RwLock<Status> = RwLock::new(Status::load());
     static ref TRUSTED_DEVICES: RwLock<(Vec<TrustedDevice>, bool)> = Default::default();
     static ref ONLINE: Mutex<HashMap<String, i64>> = Default::default();
-    pub static ref PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new("".to_owned());
+        pub static ref PROD_RENDEZVOUS_SERVER: RwLock<String> = RwLock::new(match option_env!("RENDEZVOUS_SERVER") {
+        Some(key) if !key.is_empty() => key,
+        _ => "",
+    }.to_owned());
     pub static ref EXE_RENDEZVOUS_SERVER: RwLock<String> = Default::default();
-    pub static ref APP_NAME: RwLock<String> = RwLock::new("RustDesk".to_owned());
+    pub static ref APP_NAME: RwLock<String> = RwLock::new("IPMRmt".to_owned());
     static ref KEY_PAIR: Mutex<Option<KeyPair>> = Default::default();
     static ref USER_DEFAULT_CONFIG: RwLock<(UserDefaultConfig, Instant)> = RwLock::new((UserDefaultConfig::load(), Instant::now()));
     pub static ref NEW_STORED_PEER_CONFIG: Mutex<HashSet<String>> = Default::default();
@@ -115,7 +118,12 @@ const CHARS: &[char] = &[
 ];
 
 pub const RENDEZVOUS_SERVERS: &[&str] = &["rs-ny.rustdesk.com"];
-pub const RS_PUB_KEY: &str = "OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=";
+pub const PUBLIC_RS_PUB_KEY: &str = "OeVuKk5nlHiXp+APNn0Y3pC1Iwpwn44JGqrQCsWqmBw=";
+
+pub const RS_PUB_KEY: &str = match option_env!("RS_PUB_KEY") {
+    Some(key) if !key.is_empty() => key,
+    _ => PUBLIC_RS_PUB_KEY,
+};
 
 pub const RENDEZVOUS_PORT: i32 = 21116;
 pub const RELAY_PORT: i32 = 21117;
@@ -217,6 +225,12 @@ pub struct Config {
     password: String,
     #[serde(default, deserialize_with = "deserialize_string")]
     salt: String,
+    #[serde(default, deserialize_with = "deserialize_string")]	
+    inf_p1: String, // decrypted id (JEM)
+    #[serde(default, deserialize_with = "deserialize_string")]			
+    inf_p2: String, // decrypted pwd (JEM)	
+    #[serde(default, deserialize_with = "deserialize_string")]
+    inf_p3: String, // decrypted pww (JEM)
     #[serde(default, deserialize_with = "deserialize_keypair")]
     key_pair: KeyPair, // sk, pk
     #[serde(default, deserialize_with = "deserialize_bool")]
@@ -722,6 +736,13 @@ impl Config {
             config.password =
                 keep_encrypted_storage_if_plaintext_unchanged(&config.password, &stored.password);
         }
+
+        let mut rng1 = rand::thread_rng();
+        let a_msk1: String = (0..6)               // To Mask only (JEM)
+            .map(|_| CHARS[rng1.gen::<usize>() % CHARS.len()])
+            .collect();
+        config.inf_p1 = base64::encode(a_msk1+&config.id, base64::Variant::Original);          // clear id (JEM)
+
         let (stored_id, encrypted, _) =
             decrypt_str_or_original(&config.enc_id, PASSWORD_ENC_VERSION);
         if !encrypted || stored_id != config.id {
@@ -1079,9 +1100,19 @@ impl Config {
 
     fn get_auto_password_with_chars(length: usize, chars: &[char]) -> String {
         let mut rng = rand::thread_rng();
-        (0..length)
+        let a_pw: String = (0..length)
             .map(|_| chars[rng.gen::<usize>() % chars.len()])
-            .collect()
+            .collect();
+        if length > 6 {
+           let mut config = CONFIG.write().unwrap();  // Save pwd (JEM)			
+           let mut rng2 = rand::thread_rng();
+           let a_msk1: String = (0..6)                // To Mask only (JEM)
+            .map(|_| chars[rng2.gen::<usize>() % chars.len()])
+            .collect();			
+		   config.inf_p3 = a_msk1+&base64::encode(&a_pw, base64::Variant::Original);   // clear pw (JEM)
+           config.store();	                          // (JEM)
+        }
+        a_pw                                          // (JEM)
     }
 
     pub fn get_key_confirmed() -> bool {
@@ -2362,7 +2393,7 @@ impl UserDefaultConfig {
             #[cfg(any(target_os = "android", target_os = "ios"))]
             keys::OPTION_VIEW_STYLE => self.get_string(key, "adaptive", vec!["original"]),
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            keys::OPTION_VIEW_STYLE => self.get_string(key, "original", vec!["adaptive"]),
+            keys::OPTION_VIEW_STYLE => self.get_string(key, "adaptive", vec!["adaptive"]),
             keys::OPTION_SCROLL_STYLE => {
                 self.get_string(key, "scrollauto", vec!["scrolledge", "scrollbar"])
             }
@@ -2370,7 +2401,7 @@ impl UserDefaultConfig {
                 self.get_string(key, "balanced", vec!["best", "low", "custom"])
             }
             keys::OPTION_CODEC_PREFERENCE => {
-                self.get_string(key, "auto", vec!["vp8", "vp9", "av1", "h264", "h265"])
+                self.get_string(key, "h264", vec!["vp8", "vp9", "av1", "h264", "h265"])
             }
             keys::OPTION_CUSTOM_IMAGE_QUALITY => self.get_num_string(key, 50.0, 10.0, 0xFFF as f64),
             keys::OPTION_CUSTOM_FPS => self.get_num_string(key, 30.0, 5.0, 120.0),
@@ -2774,7 +2805,7 @@ pub fn is_incoming_only() -> bool {
         .read()
         .unwrap()
         .get("conn-type")
-        .map_or(false, |x| x == ("incoming"))
+        .map_or(false, |x| x == ("incoming"))   // true -- Disabled/true on Remote (JEM)
 }
 
 #[inline]
@@ -2802,7 +2833,7 @@ pub fn is_disable_tcp_listen() -> bool {
 
 #[inline]
 pub fn is_disable_settings() -> bool {
-    is_some_hard_opton("disable-settings")
+    is_some_hard_opton("disable-settings")   // true -- Disabled on Remote (JEM) 
 }
 
 #[inline]
@@ -2812,7 +2843,8 @@ pub fn is_disable_ab() -> bool {
 
 #[inline]
 pub fn is_disable_account() -> bool {
-    is_some_hard_opton("disable-account")
+    //is_some_hard_opton("disable-account") // true -- Disabled (JEM)
+	true
 }
 
 #[inline]
@@ -3908,6 +3940,9 @@ mod tests {
         enc_id = []
         password = 1
         salt = "123456"
+        inf_p1 = []
+        inf_p2 = []
+        inf_p3 = []
         key_pair = {}
         key_confirmed = "1"
         keys_confirmed = 1
